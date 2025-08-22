@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Simple Upload and Display Map</title>
+    <link href="https://unpkg.com/dropzone@5/dist/min/dropzone.min.css" rel="stylesheet" />
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            font-family: Arial, sans-serif;
+        }
+
+        #map {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 100%;
+        }
+
+        #dropzone {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            width: 320px;
+            height: 50px;
+            z-index: 10;
+            background: white;
+            border: 2px dashed #0074D9;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #dropzone .dz-button {
+            font-weight: bold;
+            color: #0074D9;
+            cursor: pointer;
+            border: none;
+            background: none;
+            font-size: 16px;
+            border: 1px solid red;
+            
+        }
+
+        .dz-message {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+    <form id="dropzone" class="dropzone">
+        <button type="button" class="dz-button">Upload GPX, KMZ, KML, GeoJSON, SHP</button>
+    </form>
+    <div id="map"></div>
+
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet" />
+    <script src="https://unpkg.com/dropzone@5/dist/min/dropzone.min.js"></script>
+    <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
+
+    <!-- togeojson for GPX and KML/KMZ conversion -->
+    <script src="https://unpkg.com/@mapbox/togeojson@0.16.2/togeojson.js"></script>
+    <!-- shpjs for shapefile reading -->
+    <script src="https://unpkg.com/shpjs@latest/dist/shp.min.js"></script>
+
+    <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+
+    <script>
+        mapboxgl.accessToken = 'pk.eyJ1Ijoic2VyaHV6IiwiYSI6ImNseXpvc3RlczJpbnIya3FscDU2aHc5d3EifQ.FHtPjde_lqensSHZxqthgw';
+
+        const map = new mapboxgl.Map({
+            container: 'map',
+            style: 'mapbox://styles/mapbox/streets-v12', // Already in Web Mercator projection
+            center: [0, 20],
+            zoom: 2,
+            projection: 'mercator' // Explicitly set Mercator projection
+        });
+
+        Dropzone.autoDiscover = false;
+
+        const dz = new Dropzone('#dropzone', {
+            url: '#',
+            autoProcessQueue: false,
+            acceptedFiles: '.gpx,.kmz,.kml,.geojson,.json,.zip,.shp',
+            clickable: '.dz-button',
+            previewsContainer: false,
+            dictDefaultMessage: '',
+            init: function () {
+                const messageEl = this.element.querySelector('.dz-message');
+                if (messageEl) messageEl.style.display = 'none';
+            }
+        });
+
+        dz.on('addedfile', file => {
+            dz.removeAllFiles(true);
+            const ext = file.name.split('.').pop().toLowerCase();
+            if (ext === 'geojson' || ext === 'json') {
+                const reader = new FileReader();
+                reader.onload = e => {
+                    const geojson = JSON.parse(e.target.result);
+                    addGeoJSONToMap(geojson);
+                };
+                reader.readAsText(file);
+            } else if (ext === 'gpx' || ext === 'kml' || ext === 'kmz') {
+                const reader = new FileReader();
+                reader.onload = e => {
+                    const parser = new DOMParser();
+                    if (ext === 'kmz') {
+                        unzipKMZ(file).then(kmlText => {
+                            const kmlDom = parser.parseFromString(kmlText, 'text/xml');
+                            const geojson = toGeoJSON.kml(kmlDom);
+                            addGeoJSONToMap(geojson);
+                        });
+                    } else {
+                        const xml = parser.parseFromString(e.target.result, 'text/xml');
+                        const geojson = ext === 'gpx' ? toGeoJSON.gpx(xml) : toGeoJSON.kml(xml);
+                        addGeoJSONToMap(geojson);
+                    }
+                };
+                if (ext === 'kmz') {
+                    reader.readAsArrayBuffer(file);
+                } else {
+                    reader.readAsText(file);
+                }
+            } else if (ext === 'shp') {
+                alert('Please upload the complete shapefile archive (zip with .shp, .shx, .dbf files)');
+            } else if (ext === 'zip') {
+                const reader = new FileReader();
+                reader.onload = e => {
+                    shp(e.target.result).then(geojson => {
+                        addGeoJSONToMap(geojson);
+                    }).catch(() => {
+                        unzipKMZFromArrayBuffer(e.target.result).then(kmlText => {
+                            const parser = new DOMParser();
+                            const kmlDom = parser.parseFromString(kmlText, 'text/xml');
+                            const geojson = toGeoJSON.kml(kmlDom);
+                            addGeoJSONToMap(geojson);
+                        }).catch(() => alert('File format not supported.'));
+                    });
+                };
+                reader.readAsArrayBuffer(file);
+            } else {
+                alert('Unsupported file format: ' + ext);
+            }
+        });
+
+        function addGeoJSONToMap(geojson) {
+
+            console.log('geojson', geojson);
+            const id = 'uploaded-data';
+            if (map.getSource(id)) {
+                map.getSource(id).setData(geojson);
+            } else {
+                map.addSource(id, { type: 'geojson', data: geojson });
+                map.addLayer({
+                    id: id,
+                    type: 'line',
+                    source: id,
+                    paint: {
+                        'line-color': '#ff0000',
+                        'line-width': 3
+                    }
+                });
+            }
+
+            const bbox = turf.bbox(geojson);
+            map.fitBounds(bbox, {
+                padding: 50,
+                maxZoom: 15
+            });
+
+        }
+
+        function getCoords(geometry) {
+            if (!geometry) return [];
+            switch (geometry.type) {
+                case 'Point': return [geometry.coordinates];
+                case 'MultiPoint':
+                case 'LineString': return geometry.coordinates;
+                case 'MultiLineString':
+                case 'Polygon': return geometry.coordinates.flat();
+                case 'MultiPolygon': return geometry.coordinates.flat(2);
+                case 'GeometryCollection': return geometry.geometries.flatMap(getCoords);
+                default: return [];
+            }
+        }
+
+        async function unzipKMZ(file) {
+            const arrayBuffer = await file.arrayBuffer();
+            return unzipKMZFromArrayBuffer(arrayBuffer);
+        }
+
+        async function unzipKMZFromArrayBuffer(arrayBuffer) {
+            const zip = await JSZip.loadAsync(arrayBuffer);
+            for (const filename of Object.keys(zip.files)) {
+                if (filename.toLowerCase().endsWith('.kml')) {
+                    const kmlText = await zip.files[filename].async('text');
+                    return kmlText;
+                }
+            }
+            throw new Error('No KML file found inside KMZ');
+        }
+    </script>
+</body>
+
+</html>
