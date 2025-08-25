@@ -44,12 +44,23 @@
             border: none;
             background: none;
             font-size: 16px;
-            border: 1px solid red;
-            
         }
 
         .dz-message {
             display: none !important;
+        }
+
+        #layer-info {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 10px;
+            border-radius: 4px;
+            z-index: 10;
+            font-size: 12px;
+            max-width: 200px;
+            display: none;
         }
     </style>
 </head>
@@ -59,6 +70,7 @@
         <button type="button" class="dz-button">Upload GPX, KMZ, KML, GeoJSON, SHP</button>
     </form>
     <div id="map"></div>
+    <div id="layer-info"></div>
 
     <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
     <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet" />
@@ -73,17 +85,19 @@
     <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 
     <script>
-        mapboxgl.accessToken = 'pk.eyJ1Ijoic2VyaHV6IiwiYSI6ImNseXpvc3RlczJpbnIya3FscDU2aHc5d3EifQ.FHtPjde_lqensSHZxqthgw';
-
+          mapboxgl.accessToken = 'pk.eyJ1Ijoic2VyaHV6IiwiYSI6ImNseXpvc3RlczJpbnIya3FscDU2aHc5d3EifQ.FHtPjde_lqensSHZxqthgw';
         const map = new mapboxgl.Map({
             container: 'map',
-            style: 'mapbox://styles/mapbox/streets-v12', // Already in Web Mercator projection
+            style: 'mapbox://styles/mapbox/streets-v12',
             center: [0, 20],
             zoom: 2,
-            projection: 'mercator' // Explicitly set Mercator projection
+            projection: 'mercator'
         });
 
         Dropzone.autoDiscover = false;
+
+        // Keep track of added layers for cleanup
+        let currentLayers = [];
 
         const dz = new Dropzone('#dropzone', {
             url: '#',
@@ -100,6 +114,8 @@
 
         dz.on('addedfile', file => {
             dz.removeAllFiles(true);
+            clearCurrentLayers();
+            
             const ext = file.name.split('.').pop().toLowerCase();
             if (ext === 'geojson' || ext === 'json') {
                 const reader = new FileReader();
@@ -135,7 +151,7 @@
                 const reader = new FileReader();
                 reader.onload = e => {
                     shp(e.target.result).then(geojson => {
-                        addGeoJSONToMap(geojson);
+                        addShapefileToMap(geojson);
                     }).catch(() => {
                         unzipKMZFromArrayBuffer(e.target.result).then(kmlText => {
                             const parser = new DOMParser();
@@ -151,9 +167,154 @@
             }
         });
 
-        function addGeoJSONToMap(geojson) {
+        function clearCurrentLayers() {
+            currentLayers.forEach(layerId => {
+                if (map.getLayer(layerId)) {
+                    map.removeLayer(layerId);
+                }
+                if (map.getSource(layerId)) {
+                    map.removeSource(layerId);
+                }
+            });
+            currentLayers = [];
+            document.getElementById('layer-info').style.display = 'none';
+        }
 
+        function addShapefileToMap(geojsonData) {
+            console.log('Shapefile data:', geojsonData);
+            
+            // Handle both single geojson and array of geojsons (multiple layers)
+            const datasets = Array.isArray(geojsonData) ? geojsonData : [geojsonData];
+            const layerInfo = [];
+            let allFeatures = [];
+
+            datasets.forEach((geojson, index) => {
+                if (!geojson || !geojson.features || geojson.features.length === 0) {
+                    return;
+                }
+
+                // Group features by geometry type
+                const pointFeatures = [];
+                const lineFeatures = [];
+                const polygonFeatures = [];
+
+                geojson.features.forEach(feature => {
+                    if (!feature.geometry) return;
+                    
+                    const geomType = feature.geometry.type;
+                    if (geomType === 'Point' || geomType === 'MultiPoint') {
+                        pointFeatures.push(feature);
+                    } else if (geomType === 'LineString' || geomType === 'MultiLineString') {
+                        lineFeatures.push(feature);
+                    } else if (geomType === 'Polygon' || geomType === 'MultiPolygon') {
+                        polygonFeatures.push(feature);
+                    }
+                });
+
+                // Add layers for each geometry type
+                if (pointFeatures.length > 0) {
+                    const sourceId = `shapefile-points-${index}`;
+                    const pointGeoJSON = { type: 'FeatureCollection', features: pointFeatures };
+                    
+                    map.addSource(sourceId, { type: 'geojson', data: pointGeoJSON });
+                    
+                    // Add circle layer for points
+                    map.addLayer({
+                        id: sourceId,
+                        type: 'circle',
+                        source: sourceId,
+                        paint: {
+                            'circle-radius': 6,
+                            'circle-color': '#FF6B6B',
+                            'circle-stroke-color': '#ffffff',
+                            'circle-stroke-width': 2
+                        }
+                    });
+                    
+                    currentLayers.push(sourceId);
+                    layerInfo.push(`Points: ${pointFeatures.length}`);
+                    allFeatures = allFeatures.concat(pointFeatures);
+                }
+
+                if (lineFeatures.length > 0) {
+                    const sourceId = `shapefile-lines-${index}`;
+                    const lineGeoJSON = { type: 'FeatureCollection', features: lineFeatures };
+                    
+                    map.addSource(sourceId, { type: 'geojson', data: lineGeoJSON });
+                    
+                    // Add line layer
+                    map.addLayer({
+                        id: sourceId,
+                        type: 'line',
+                        source: sourceId,
+                        paint: {
+                            'line-color': '#4ECDC4',
+                            'line-width': 3,
+                            'line-opacity': 0.8
+                        }
+                    });
+                    
+                    currentLayers.push(sourceId);
+                    layerInfo.push(`Lines: ${lineFeatures.length}`);
+                    allFeatures = allFeatures.concat(lineFeatures);
+                }
+
+                if (polygonFeatures.length > 0) {
+                    const sourceId = `shapefile-polygons-${index}`;
+                    const polygonGeoJSON = { type: 'FeatureCollection', features: polygonFeatures };
+                    
+                    map.addSource(sourceId, { type: 'geojson', data: polygonGeoJSON });
+                    
+                    // Add fill layer for polygons
+                    map.addLayer({
+                        id: `${sourceId}-fill`,
+                        type: 'fill',
+                        source: sourceId,
+                        paint: {
+                            'fill-color': '#45B7D1',
+                            'fill-opacity': 0.3
+                        }
+                    });
+                    
+                    // Add outline layer for polygons
+                    map.addLayer({
+                        id: `${sourceId}-outline`,
+                        type: 'line',
+                        source: sourceId,
+                        paint: {
+                            'line-color': '#45B7D1',
+                            'line-width': 2
+                        }
+                    });
+                    
+                    currentLayers.push(`${sourceId}-fill`, `${sourceId}-outline`);
+                    layerInfo.push(`Polygons: ${polygonFeatures.length}`);
+                    allFeatures = allFeatures.concat(polygonFeatures);
+                }
+            });
+
+            // Show layer information
+            if (layerInfo.length > 0) {
+                const infoEl = document.getElementById('layer-info');
+                infoEl.innerHTML = `<strong>Loaded:</strong><br>${layerInfo.join('<br>')}`;
+                infoEl.style.display = 'block';
+            }
+
+            // Fit map to all features
+            if (allFeatures.length > 0) {
+                const allGeoJSON = { type: 'FeatureCollection', features: allFeatures };
+                const bbox = turf.bbox(allGeoJSON);
+                map.fitBounds(bbox, {
+                    padding: 50,
+                    maxZoom: 15
+                });
+            }
+        }
+
+        function addGeoJSONToMap(geojson) {
             console.log('geojson', geojson);
+            
+            // For non-shapefile data, use the original simple approach
             const id = 'uploaded-data';
             if (map.getSource(id)) {
                 map.getSource(id).setData(geojson);
@@ -168,6 +329,7 @@
                         'line-width': 3
                     }
                 });
+                currentLayers.push(id);
             }
 
             const bbox = turf.bbox(geojson);
@@ -175,8 +337,37 @@
                 padding: 50,
                 maxZoom: 15
             });
-
         }
+
+        // Add click handlers for feature inspection
+        map.on('click', (e) => {
+            const features = map.queryRenderedFeatures(e.point);
+            if (features.length > 0) {
+                const feature = features[0];
+                const props = feature.properties;
+                
+                let popupContent = '<strong>Feature Properties:</strong><br>';
+                Object.keys(props).forEach(key => {
+                    if (props[key] !== null && props[key] !== undefined) {
+                        popupContent += `<strong>${key}:</strong> ${props[key]}<br>`;
+                    }
+                });
+                
+                new mapboxgl.Popup()
+                    .setLngLat(e.lngLat)
+                    .setHTML(popupContent)
+                    .addTo(map);
+            }
+        });
+
+        // Change cursor on hover
+        map.on('mouseenter', currentLayers, () => {
+            map.getCanvas().style.cursor = 'pointer';
+        });
+
+        map.on('mouseleave', currentLayers, () => {
+            map.getCanvas().style.cursor = '';
+        });
 
         function getCoords(geometry) {
             if (!geometry) return [];
